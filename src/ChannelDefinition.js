@@ -1,17 +1,37 @@
-var ChannelDefinition = function ( channelName ) {
-	this.channel = channelName || DEFAULT_CHANNEL;
+/* global _postal, SubscriptionDefinition, _config, _ */
+
+var ChannelDefinition = function( channelName, bus ) {
+	this.bus = bus;
+	this.channel = channelName || _config.DEFAULT_CHANNEL;
 };
 
-ChannelDefinition.prototype.subscribe = function () {
-	return arguments.length === 1 ?
-	       new SubscriptionDefinition( this.channel, arguments[0].topic, arguments[0].callback ) :
-	       new SubscriptionDefinition( this.channel, arguments[0], arguments[1] );
+ChannelDefinition.prototype.subscribe = function() {
+	return this.bus.subscribe( {
+		channel: this.channel,
+		topic: ( arguments.length === 1 ? arguments[ 0 ].topic : arguments[ 0 ] ),
+		callback: ( arguments.length === 1 ? arguments[ 0 ].callback : arguments[ 1 ] )
+	} );
 };
 
-ChannelDefinition.prototype.publish = function () {
-	var envelope = arguments.length === 1 ?
-	                (Object.prototype.toString.call(arguments[0]) === '[object String]' ?
-                  { topic: arguments[0] } : arguments[0]) : { topic : arguments[0], data : arguments[1] };
+/*
+    publish( envelope [, callback ] );
+    publish( topic, data [, callback ] );
+*/
+ChannelDefinition.prototype.publish = function() {
+	var envelope = {};
+	var callback;
+	if ( typeof arguments[ 0 ] === "string" ) {
+		envelope.topic = arguments[ 0 ];
+		envelope.data = arguments[ 1 ];
+		callback = arguments[ 2 ];
+	} else {
+		envelope = arguments[ 0 ];
+		callback = arguments[ 1 ];
+	}
+	if ( typeof envelope !== "object" ) {
+		throw new Error( "The first argument to ChannelDefinition.publish should be either an envelope object or a string topic." );
+	}
+	envelope.headers = _.extend( envelope.headers || { resolverNoCache: _config.resolverNoCache } );
 	envelope.channel = this.channel;
-	return postal.configuration.bus.publish( envelope );
+	this.bus.publish( envelope, callback );
 };

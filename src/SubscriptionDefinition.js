@@ -1,129 +1,214 @@
-var SubscriptionDefinition = function ( channel, topic, callback ) {
+/* global postal, _ */
+var SubscriptionDefinition = function( channel, topic, callback ) {
+	if ( arguments.length !== 3 ) {
+		throw new Error( "You must provide a channel, topic and callback when creating a SubscriptionDefinition instance." );
+	}
+	if ( topic.length === 0 ) {
+		throw new Error( "Topics cannot be empty" );
+	}
 	this.channel = channel;
 	this.topic = topic;
 	this.callback = callback;
-	this.constraints = [];
-	this.context = null;
-	postal.configuration.bus.publish( {
-		channel : SYSTEM_CHANNEL,
-		topic : "subscription.created",
-		data : {
-			event : "subscription.created",
-			channel : channel,
-			topic : topic
+	this.pipeline = [];
+	this.cacheKeys = [];
+	this._context = undefined;
+};
+
+var ConsecutiveDistinctPredicate = function() {
+	var previous;
+	return function( data ) {
+		var eq = false;
+		if ( typeof data === "string" ) {
+			eq = data === previous;
+			previous = data;
+		} else {
+			eq = _.isEqual( data, previous );
+			previous = _.extend( {}, data );
 		}
-	} );
-	postal.configuration.bus.subscribe( this );
+		return !eq;
+	};
+};
+
+var DistinctPredicate = function DistinctPredicateFactory() {
+	var previous = [];
+	return function DistinctPredicate( data ) {
+		var isDistinct = !_.some( previous, function( p ) {
+			return _.isEqual( data, p );
+		} );
+		if ( isDistinct ) {
+			previous.push( data );
+		}
+		return isDistinct;
+	};
 };
 
 SubscriptionDefinition.prototype = {
-	unsubscribe : function () {
-		postal.configuration.bus.unsubscribe( this );
-		postal.configuration.bus.publish( {
-			channel : SYSTEM_CHANNEL,
-			topic : "subscription.removed",
-			data : {
-				event : "subscription.removed",
-				channel : this.channel,
-				topic : this.topic
+
+	"catch": function( errorHandler ) {
+		var original = this.callback;
+		var safeCallback = function() {
+			try {
+				original.apply( this, arguments );
+			} catch ( err ) {
+				errorHandler( err, arguments[ 0 ] );
+			}
+		};
+		this.callback = safeCallback;
+		return this;
+	},
+
+	defer: function defer() {
+		return this.delay( 0 );
+	},
+
+	disposeAfter: function disposeAfter( maxCalls ) {
+		if ( typeof maxCalls !== "number" || maxCalls <= 0 ) {
+			throw new Error( "The value provided to disposeAfter (maxCalls) must be a number greater than zero." );
+		}
+		var dispose = _.after( maxCalls, this.unsubscribe.bind( this ) );
+		this.pipeline.push( function( data, env, next ) {
+			next( data, env );
+			dispose();
+		} );
+		return this;
+	},
+
+	distinct: function distinct() {
+		return this.constraint( new DistinctPredicate() );
+	},
+
+	distinctUntilChanged: function distinctUntilChanged() {
+		return this.constraint( new ConsecutiveDistinctPredicate() );
+	},
+
+	invokeSubscriber: function invokeSubscriber( data, env ) {
+		if ( !this.inactive ) {
+			var self = this;
+			var pipeline = self.pipeline;
+			var len = pipeline.length;
+			var context = self._context;
+			var idx = -1;
+			var invoked = false;
+			if ( !len ) {
+				self.callback.call( context, data, env );
+				invoked = true;
+			} else {
+				pipeline = pipeline.concat( [ self.callback ] );
+				var step = function step( d, e ) {
+					idx += 1;
+					if ( idx < len ) {
+						pipeline[ idx ].call( context, d, e, step );
+					} else {
+						self.callback.call( context, d, e );
+						invoked = true;
+					}
+				};
+				step( data, env, 0 );
+			}
+			return invoked;
+		}
+	},
+
+	logError: function logError() {
+		/* istanbul ignore else */
+		if ( console ) {
+			var report;
+			if ( console.warn ) {
+				report = console.warn;
+			} else {
+				report = console.log;
+			}
+			this.catch( report );
+		}
+		return this;
+	},
+
+	once: function once() {
+		return this.disposeAfter( 1 );
+	},
+
+	subscribe: function subscribe( callback ) {
+		this.callback = callback;
+		return this;
+	},
+
+	unsubscribe: function unsubscribe() {
+		/* istanbul ignore else */
+		if ( !this.inactive ) {
+			postal.unsubscribe( this );
+		}
+	},
+
+	constraint: function constraint( predicate ) {
+		if ( typeof predicate !== "function" ) {
+			throw new Error( "Predicate constraint must be a function" );
+		}
+		this.pipeline.push( function( data, env, next ) {
+			if ( predicate.call( this, data, env ) ) {
+				next( data, env );
 			}
 		} );
-	},
-
-	defer : function () {
-		var fn = this.callback;
-		this.callback = function ( data ) {
-			setTimeout( fn, 0, data );
-		};
 		return this;
 	},
 
-	disposeAfter : function ( maxCalls ) {
-		if ( _.isNaN( maxCalls ) || maxCalls <= 0 ) {
-			throw "The value provided to disposeAfter (maxCalls) must be a number greater than zero.";
-		}
-		var fn = this.callback;
-		var dispose = _.after( maxCalls, _.bind( function () {
-			this.unsubscribe();
-		}, this ) );
-
-		this.callback = function () {
-			fn.apply( this.context, arguments );
-			dispose();
-		};
-		return this;
-	},
-
-	distinctUntilChanged : function () {
-		this.withConstraint( new ConsecutiveDistinctPredicate() );
-		return this;
-	},
-
-	distinct : function () {
-		this.withConstraint( new DistinctPredicate() );
-		return this;
-	},
-
-	once : function () {
-		this.disposeAfter( 1 );
-	},
-
-	withConstraint : function ( predicate ) {
-		if ( !_.isFunction( predicate ) ) {
-			throw "Predicate constraint must be a function";
-		}
-		this.constraints.push( predicate );
-		return this;
-	},
-
-	withConstraints : function ( predicates ) {
+	constraints: function constraints( predicates ) {
 		var self = this;
-		if ( _.isArray( predicates ) ) {
-			_.each( predicates, function ( predicate ) {
-				self.withConstraint( predicate );
-			} );
-		}
+		/* istanbul ignore else */
+		_.each( predicates, function( predicate ) {
+			self.constraint( predicate );
+		} );
 		return self;
 	},
 
-	withContext : function ( context ) {
-		this.context = context;
+	context: function contextSetter( context ) {
+		this._context = context;
 		return this;
 	},
 
-	withDebounce : function ( milliseconds ) {
-		if ( _.isNaN( milliseconds ) ) {
-			throw "Milliseconds must be a number";
+	debounce: function debounce( milliseconds, immediate ) {
+		if ( typeof milliseconds !== "number" ) {
+			throw new Error( "Milliseconds must be a number" );
 		}
-		var fn = this.callback;
-		this.callback = _.debounce( fn, milliseconds );
+
+		var options = {};
+
+		if ( !!immediate === true ) { //jshint ignore:line
+			options.leading = true;
+			options.trailing = false;
+		}
+
+		this.pipeline.push(
+			_.debounce( function( data, env, next ) {
+				next( data, env );
+			},
+				milliseconds,
+				options
+			)
+		);
 		return this;
 	},
 
-	withDelay : function ( milliseconds ) {
-		if ( _.isNaN( milliseconds ) ) {
-			throw "Milliseconds must be a number";
+	delay: function delay( milliseconds ) {
+		if ( typeof milliseconds !== "number" ) {
+			throw new Error( "Milliseconds must be a number" );
 		}
-		var fn = this.callback;
-		this.callback = function ( data ) {
-			setTimeout( function () {
-				fn( data );
+		var self = this;
+		self.pipeline.push( function( data, env, next ) {
+			setTimeout( function() {
+				next( data, env );
 			}, milliseconds );
-		};
+		} );
 		return this;
 	},
 
-	withThrottle : function ( milliseconds ) {
-		if ( _.isNaN( milliseconds ) ) {
-			throw "Milliseconds must be a number";
+	throttle: function throttle( milliseconds ) {
+		if ( typeof milliseconds !== "number" ) {
+			throw new Error( "Milliseconds must be a number" );
 		}
-		var fn = this.callback;
-		this.callback = _.throttle( fn, milliseconds );
-		return this;
-	},
-
-	subscribe : function ( callback ) {
-		this.callback = callback;
+		var fn = function( data, env, next ) {
+			next( data, env );
+		};
+		this.pipeline.push( _.throttle( fn, milliseconds ) );
 		return this;
 	}
 };

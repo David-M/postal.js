@@ -13,3 +13,6 @@ desktop.ini
 .anvil
 *node_modules
 *npm-debug*
+report/
+bower/
+coverage/

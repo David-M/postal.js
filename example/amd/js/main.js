@@ -1,14 +1,15 @@
 require.config( {
-	paths : {
-		underscore  : 'libs/underscore/underscore-min',
-		postal      : 'libs/postal/postal',
-		postaldiags : 'libs/postal/postal.diagnostics',
-		jquery      : 'libs/jquery/jquery-min'
+	paths: {
+		lodash: "../../../bower/lodash/dist/lodash",
+		postal: "../../../lib/postal",
+		postaldiags: "../../../bower/postal.diagnostics/lib/postal.diagnostics",
+		jquery: "../../../bower/jquery/jquery.min",
+		conduitjs: "../../../bower/conduitjs/lib/conduit.min"
 	}
 } );
 
-require( [ 'jquery' ], function ( $ ) {
-	$( function () {
-		require( [ 'examples' ] );
+require( [ "jquery" ], function( $ ) {
+	$( function() {
+		require( [ "examples" ] );
 	} );
 } );
